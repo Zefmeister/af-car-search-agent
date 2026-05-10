@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.git/
+.env
+.env.*
+!.env.example
+*.pyc
+*.egg-info/
+dist/
+build/
+.foundry/
+*.zip
+teams-bridge/
+process-documentation.md
+step-by-step.md
+README.md
+.vscode/
