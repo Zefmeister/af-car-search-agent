@@ -1,0 +1,5 @@
+azure-functions
+botbuilder-core
+botbuilder-integration-aiohttp
+azure-identity
+requests

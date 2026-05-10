@@ -1,0 +1,50 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "version": "1.0.0",
+  "id": "<your-bot-app-id>",
+  "developer": {
+    "name": "Car Search Agent",
+    "websiteUrl": "https://car-search-bridge.azurewebsites.net",
+    "privacyUrl": "https://car-search-bridge.azurewebsites.net/api/health",
+    "termsOfUseUrl": "https://car-search-bridge.azurewebsites.net/api/health"
+  },
+  "name": {
+    "short": "CarFinder",
+    "full": "CarFinder AI Car Search Assistant"
+  },
+  "description": {
+    "short": "AI-powered car search assistant",
+    "full": "Search for cars using natural language. Find vehicles by make, model, price, location, and more. Powered by Azure Foundry AI agent."
+  },
+  "icons": {
+    "outline": "outline.png",
+    "color": "color.png"
+  },
+  "accentColor": "#4F6BED",
+  "bots": [
+    {
+      "botId": "<your-bot-app-id>",
+      "scopes": ["personal", "team", "groupChat"],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": ["personal"],
+          "commands": [
+            {
+              "title": "search",
+              "description": "Search for cars (e.g., 'Find Honda SUVs under $30k')"
+            },
+            {
+              "title": "details",
+              "description": "Get details on a listing (e.g., 'Details on CAR-0042')"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": ["car-search-bridge.azurewebsites.net"]
+}

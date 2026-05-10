@@ -1,0 +1,7 @@
+agent-framework
+agent-framework-foundry-hosting
+azure-identity
+python-dotenv
+pydantic
+debugpy
+agent-dev-cli

@@ -1,0 +1,5 @@
+{
+    "snyk.advanced.organization": "3cca0906-cb69-4168-8790-f94e0df82fa9",
+    "snyk.advanced.autoSelectOrganization": true,
+    "chat.agent.maxRequests": 50000
+}

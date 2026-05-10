@@ -1,0 +1,7 @@
+.venv
+.env
+local.settings.json
+app.py
+deploy.zip
+__pycache__
+.git
