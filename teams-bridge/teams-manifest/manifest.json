@@ -10,12 +10,12 @@
     "termsOfUseUrl": "https://car-search-bridge.azurewebsites.net/api/health"
   },
   "name": {
-    "short": "CarFinder",
-    "full": "CarFinder AI Car Search Assistant"
+    "short": "SafeCheck",
+    "full": "SafeCheck Vehicle Safety Research Assistant"
   },
   "description": {
-    "short": "AI-powered car search assistant",
-    "full": "Search for cars using natural language. Find vehicles by make, model, price, location, and more. Powered by Azure Foundry AI agent."
+    "short": "Vehicle safety research powered by NHTSA data",
+    "full": "Research vehicle safety using official NHTSA government data. Check recalls, safety ratings, consumer complaints, decode VINs, and browse models. Powered by Azure Foundry AI agent."
   },
   "icons": {
     "outline": "outline.png",
@@ -33,12 +33,16 @@
           "scopes": ["personal"],
           "commands": [
             {
-              "title": "search",
-              "description": "Search for cars (e.g., 'Find Honda SUVs under $30k')"
+              "title": "recalls",
+              "description": "Check safety recalls (e.g., 'Recalls for 2021 Honda Civic')"
             },
             {
-              "title": "details",
-              "description": "Get details on a listing (e.g., 'Details on CAR-0042')"
+              "title": "ratings",
+              "description": "Get crash test ratings (e.g., 'Safety ratings for 2024 Toyota Camry')"
+            },
+            {
+              "title": "vin",
+              "description": "Decode a VIN (e.g., 'Decode 1HGBH41JXMN109186')"
             }
           ]
         }

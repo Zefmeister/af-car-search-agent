@@ -111,9 +111,11 @@ class CarSearchBot(ActivityHandler):
         for member in members_added:
             if member.id != turn_context.activity.recipient.id:
                 await turn_context.send_activity(
-                    "Hi! I'm **CarFinder** 🚗 — your AI car search assistant.\n\n"
-                    "Tell me what you're looking for, like:\n"
-                    "- *Find Honda SUVs near 90210 under $30,000*\n"
-                    "- *Show me electric cars in Los Angeles*\n"
-                    "- *Get details on listing CAR-0042*"
+                    "Hi! I'm **SafeCheck** 🛡️ — your vehicle safety research assistant.\n\n"
+                    "I use official NHTSA government data to help you research vehicle safety. Try:\n"
+                    "- *Are there any recalls on a 2021 Honda Civic?*\n"
+                    "- *What are the safety ratings for a 2024 Toyota Camry?*\n"
+                    "- *Decode VIN 1HGBH41JXMN109186*\n"
+                    "- *Show me complaints for a 2022 Ford F-150*\n"
+                    "- *What models does Subaru make?*"
                 )
