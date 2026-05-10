@@ -3,5 +3,6 @@ agent-framework-foundry-hosting
 azure-identity
 python-dotenv
 pydantic
+requests
 debugpy
 agent-dev-cli

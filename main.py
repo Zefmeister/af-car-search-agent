@@ -1,4 +1,5 @@
-# Copyright (c) 2026. Car Search Agent — Microsoft Agent Framework.
+# Copyright (c) 2026. SafeCheck — NHTSA Vehicle Safety Agent.
+# Microsoft Agent Framework + free NHTSA government APIs.
 
 import os
 
@@ -10,127 +11,311 @@ from dotenv import load_dotenv
 from pydantic import Field
 from typing_extensions import Annotated
 
-from car_data import CarSearchService
-
 # Load environment variables from .env file.
 # override=False so Foundry-injected env vars take precedence at runtime.
 load_dotenv(override=False)
 
-# Initialise the car search data service
-car_service = CarSearchService()
+# ── Service initialisation (MOCK_MODE toggle) ────────────────────────────────
+
+_mock_mode = os.environ.get("MOCK_MODE", "false").lower() in ("true", "1", "yes")
+
+if _mock_mode:
+    from mock_service import MockService
+    _svc = MockService()
+else:
+    from nhtsa_service import NHTSAService
+    _svc = NHTSAService()
 
 # ── Tools ────────────────────────────────────────────────────────────────────
 
 
 @tool(approval_mode="never_require")
-def search_cars(
-    zip_code: Annotated[str, Field(description="The 5-digit US zip code to search near")],
-    max_price: Annotated[int | None, Field(description="Maximum price in USD")] = None,
-    min_price: Annotated[int | None, Field(description="Minimum price in USD")] = None,
-    make: Annotated[str | None, Field(description="Car make / manufacturer (e.g. Toyota, Honda, BMW)")] = None,
-    model: Annotated[str | None, Field(description="Car model (e.g. Camry, Civic, X3)")] = None,
-    year_min: Annotated[int | None, Field(description="Minimum model year")] = None,
-    year_max: Annotated[int | None, Field(description="Maximum model year")] = None,
-    max_mileage: Annotated[int | None, Field(description="Maximum mileage in miles")] = None,
-    condition: Annotated[str | None, Field(description="'new' or 'used'")] = None,
-    body_type: Annotated[str | None, Field(description="Body type: sedan, suv, truck, coupe, hatchback, wagon, van, convertible")] = None,
-    fuel_type: Annotated[str | None, Field(description="Fuel type: gas, diesel, electric, hybrid, plug-in hybrid")] = None,
-    color: Annotated[str | None, Field(description="Exterior color")] = None,
-    radius_miles: Annotated[int | None, Field(description="Search radius in miles from zip code (default 25)")] = 25,
+def decode_vin(
+    vin: Annotated[str, Field(description="The 17-character Vehicle Identification Number (VIN)")],
 ) -> str:
-    """Search for available cars based on the user's preferences.
+    """Decode a VIN to get full vehicle specifications — make, model, year,
+    engine, body type, safety features, and manufacturing details.
 
-    Returns a list of matching car listings with details like price, mileage,
-    year, make, model, and dealer information. Always ask the user for at
-    least a zip code before calling this tool.
+    A VIN is the unique 17-character code stamped on every vehicle. Users can
+    find it on their dashboard (driver side), door jamb, or insurance card.
     """
-    results = car_service.search(
-        zip_code=zip_code,
-        max_price=max_price,
-        min_price=min_price,
-        make=make,
-        model=model,
-        year_min=year_min,
-        year_max=year_max,
-        max_mileage=max_mileage,
-        condition=condition,
-        body_type=body_type,
-        fuel_type=fuel_type,
-        color=color,
-        radius_miles=radius_miles,
-    )
-    if not results:
-        return "No cars found matching your criteria. Try broadening your search — increase the radius, raise the budget, or remove some filters."
-    # Format results for the model
-    lines = [f"Found {len(results)} car(s):\n"]
-    for i, car in enumerate(results, 1):
-        lines.append(
-            f"{i}. {car['year']} {car['make']} {car['model']} — "
-            f"${car['price']:,} | {car['mileage']:,} mi | {car['condition']} | "
-            f"{car['color']} {car['body_type']} | {car['fuel_type']} | "
-            f"Dealer: {car['dealer_name']} ({car['dealer_city']}, {car['dealer_state']}) | "
-            f"{car['distance_miles']} mi away"
-        )
+    try:
+        result = _svc.decode_vin(vin)
+    except RuntimeError as e:
+        return f"Error decoding VIN: {e}"
+
+    if "error" in result:
+        return result["error"]
+
+    lines = [f"## VIN Decode: {result.get('vin', vin)}"]
+
+    # Core specs
+    year = result.get("year", "")
+    make = result.get("make", "")
+    model = result.get("model", "")
+    trim = result.get("trim", "")
+    lines.append(f"**Vehicle:** {year} {make} {model} {trim}".strip())
+    if result.get("body_class"):
+        lines.append(f"**Body:** {result['body_class']}")
+    if result.get("vehicle_type"):
+        lines.append(f"**Type:** {result['vehicle_type']}")
+    if result.get("doors"):
+        lines.append(f"**Doors:** {result['doors']}")
+    if result.get("drive_type"):
+        lines.append(f"**Drive:** {result['drive_type']}")
+
+    # Powertrain
+    engine_parts = []
+    if result.get("displacement_l"):
+        engine_parts.append(f"{result['displacement_l']}L")
+    if result.get("engine_cylinders"):
+        engine_parts.append(f"{result['engine_cylinders']}-cyl")
+    if result.get("engine_hp"):
+        engine_parts.append(f"{result['engine_hp']} hp")
+    if engine_parts:
+        lines.append(f"**Engine:** {' / '.join(engine_parts)}")
+    if result.get("fuel_type_primary"):
+        lines.append(f"**Fuel:** {result['fuel_type_primary']}")
+    if result.get("electrification"):
+        lines.append(f"**Electrification:** {result['electrification']}")
+    if result.get("transmission"):
+        lines.append(f"**Transmission:** {result['transmission']}")
+
+    # Manufacturing
+    plant_parts = []
+    if result.get("plant_city"):
+        plant_parts.append(result["plant_city"])
+    if result.get("plant_country"):
+        plant_parts.append(result["plant_country"])
+    if plant_parts:
+        lines.append(f"**Assembled in:** {', '.join(plant_parts)}")
+    if result.get("manufacturer"):
+        lines.append(f"**Manufacturer:** {result['manufacturer']}")
+
+    # Safety features
+    safety = []
+    for feat, label in [
+        ("abs", "ABS"),
+        ("esc", "ESC"),
+        ("tpms", "TPMS"),
+        ("forward_collision_warning", "Forward Collision Warning"),
+        ("lane_departure_warning", "Lane Departure Warning"),
+        ("adaptive_cruise_control", "Adaptive Cruise Control"),
+        ("blind_spot_warning", "Blind Spot Warning"),
+    ]:
+        val = result.get(feat)
+        if val and val.lower() not in ("", "not applicable"):
+            safety.append(f"{label}: {val}")
+    if safety:
+        lines.append("")
+        lines.append("**Safety Features:**")
+        for s in safety:
+            lines.append(f"- {s}")
+
+    if result.get("error_text"):
+        lines.append(f"\n⚠️ {result['error_text']}")
+
     return "\n".join(lines)
 
 
 @tool(approval_mode="never_require")
-def get_car_details(
-    listing_id: Annotated[str, Field(description="The listing ID of the car to get details for")],
+def get_recalls(
+    make: Annotated[str, Field(description="Vehicle make (e.g. Honda, Toyota, Ford)")],
+    model: Annotated[str, Field(description="Vehicle model (e.g. Civic, Camry, F-150)")],
+    year: Annotated[int, Field(description="Model year (e.g. 2021)")],
 ) -> str:
-    """Get detailed information about a specific car listing, including
-    full feature list, vehicle history, and dealer contact information.
+    """Check for open safety recalls on a specific vehicle.
+
+    NHTSA recalls are manufacturer-issued fixes for safety defects.
+    Recall repairs are always free at authorized dealers.
     """
-    car = car_service.get_details(listing_id)
-    if not car:
-        return "Listing not found. It may have been sold or removed."
+    try:
+        recalls = _svc.get_recalls(make, model, year)
+    except RuntimeError as e:
+        return f"Error checking recalls: {e}"
+
+    if not recalls:
+        return f"No recalls found for {year} {make} {model}. ✅"
+
+    lines = [f"## Recalls for {year} {make} {model} — {len(recalls)} found\n"]
+    for i, r in enumerate(recalls, 1):
+        lines.append(f"### Recall {i}: {r.get('nhtsa_campaign_number', 'N/A')}")
+        lines.append(f"**Component:** {r.get('component', 'N/A')}")
+        lines.append(f"**Date:** {r.get('report_date', 'N/A')}")
+        lines.append(f"**Summary:** {r.get('summary', 'N/A')}")
+        lines.append(f"**Consequence:** {r.get('consequence', 'N/A')}")
+        lines.append(f"**Remedy:** {r.get('remedy', 'N/A')}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+@tool(approval_mode="never_require")
+def get_complaints(
+    make: Annotated[str, Field(description="Vehicle make (e.g. Honda, Toyota, Ford)")],
+    model: Annotated[str, Field(description="Vehicle model (e.g. Civic, Camry, F-150)")],
+    year: Annotated[int, Field(description="Model year (e.g. 2021)")],
+) -> str:
+    """Look up consumer complaints filed with NHTSA for a vehicle.
+
+    Complaints are reports from real owners about problems they experienced.
+    Useful for spotting common issues before buying a used car.
+    """
+    try:
+        complaints = _svc.get_complaints(make, model, year)
+    except RuntimeError as e:
+        return f"Error fetching complaints: {e}"
+
+    if not complaints:
+        return f"No complaints filed for {year} {make} {model}. ✅"
+
+    # Summarise — can be many complaints, limit output
+    total = len(complaints)
+    shown = complaints[:10]
+    lines = [f"## Complaints for {year} {make} {model} — {total} total\n"]
+
+    crashes = sum(1 for c in complaints if c.get("crash"))
+    fires = sum(1 for c in complaints if c.get("fire"))
+    injuries = sum(c.get("injuries", 0) for c in complaints)
+    if crashes or fires or injuries:
+        lines.append(f"⚠️ **Incidents:** {crashes} crashes, {fires} fires, {injuries} injuries reported\n")
+
+    for i, c in enumerate(shown, 1):
+        lines.append(f"**{i}. {c.get('component', 'N/A')}** (filed {c.get('date_filed', 'N/A')})")
+        lines.append(f"   {c.get('summary', 'N/A')}")
+        lines.append("")
+
+    if total > 10:
+        lines.append(f"_(Showing 10 of {total} complaints)_")
+
+    return "\n".join(lines)
+
+
+@tool(approval_mode="never_require")
+def get_safety_ratings(
+    make: Annotated[str, Field(description="Vehicle make (e.g. Honda, Toyota, Ford)")],
+    model: Annotated[str, Field(description="Vehicle model (e.g. Civic, Camry, F-150)")],
+    year: Annotated[int, Field(description="Model year (e.g. 2021)")],
+) -> str:
+    """Get NCAP crash test safety ratings from NHTSA.
+
+    Ratings range from 1 to 5 stars. Not all vehicles have been tested.
+    Covers frontal crash, side crash, and rollover resistance.
+    """
+    try:
+        rating = _svc.get_safety_ratings(make, model, year)
+    except RuntimeError as e:
+        return f"Error fetching safety ratings: {e}"
+
+    if not rating:
+        return (
+            f"No NCAP crash test ratings available for {year} {make} {model}. "
+            "This vehicle may not have been tested by NHTSA."
+        )
+
+    def stars(val: str) -> str:
+        try:
+            n = int(val)
+            return "⭐" * n + f" ({n}/5)"
+        except (ValueError, TypeError):
+            return val or "Not Rated"
+
     lines = [
-        f"## {car['year']} {car['make']} {car['model']} {car.get('trim', '')}",
-        f"**Price:** ${car['price']:,}",
-        f"**Condition:** {car['condition']}",
-        f"**Mileage:** {car['mileage']:,} miles",
-        f"**Exterior Color:** {car['color']}",
-        f"**Body Type:** {car['body_type']}",
-        f"**Fuel Type:** {car['fuel_type']}",
-        f"**Transmission:** {car.get('transmission', 'N/A')}",
-        f"**Drivetrain:** {car.get('drivetrain', 'N/A')}",
-        f"**Engine:** {car.get('engine', 'N/A')}",
-        f"**VIN:** {car.get('vin', 'N/A')}",
+        f"## Safety Ratings: {rating.get('vehicle_description', f'{year} {make} {model}')}\n",
+        f"**Overall:** {stars(rating.get('overall_rating', ''))}",
         "",
-        f"**Features:** {', '.join(car.get('features', []))}",
+        "**Frontal Crash:**",
+        f"- Overall: {stars(rating.get('overall_front_crash', ''))}",
+        f"- Driver: {stars(rating.get('front_crash_driver', ''))}",
+        f"- Passenger: {stars(rating.get('front_crash_passenger', ''))}",
         "",
-        f"**Dealer:** {car['dealer_name']}",
-        f"**Location:** {car['dealer_city']}, {car['dealer_state']} {car['dealer_zip']}",
-        f"**Phone:** {car.get('dealer_phone', 'N/A')}",
+        "**Side Crash:**",
+        f"- Overall: {stars(rating.get('overall_side_crash', ''))}",
+        f"- Driver: {stars(rating.get('side_crash_driver', ''))}",
+        f"- Passenger: {stars(rating.get('side_crash_passenger', ''))}",
+        "",
+        f"**Rollover Resistance:** {stars(rating.get('rollover_rating', ''))}",
     ]
+    if rating.get("rollover_possibility_pct"):
+        lines.append(f"- Rollover risk: {rating['rollover_possibility_pct']}")
+
+    lines.append("")
+    lines.append(
+        f"**NHTSA Records:** {rating.get('complaints_count', 0)} complaints, "
+        f"{rating.get('recalls_count', 0)} recalls, "
+        f"{rating.get('investigation_count', 0)} investigations"
+    )
+    return "\n".join(lines)
+
+
+@tool(approval_mode="never_require")
+def lookup_models(
+    make: Annotated[str, Field(description="Vehicle make / manufacturer (e.g. Honda, Toyota, BMW)")],
+    year: Annotated[int | None, Field(description="Optional model year to filter by")] = None,
+) -> str:
+    """Look up what models are available for a given make, optionally for a
+    specific year. Useful when the user knows the brand but not the model name.
+    """
+    try:
+        models = _svc.get_models_for_make(make, year)
+    except RuntimeError as e:
+        return f"Error looking up models: {e}"
+
+    if not models:
+        year_str = f" ({year})" if year else ""
+        return f"No models found for {make}{year_str}. Check the manufacturer name."
+
+    year_str = f" ({year})" if year else ""
+    lines = [f"## Models for {make.upper()}{year_str} — {len(models)} found\n"]
+    for m in models:
+        lines.append(f"- {m.get('model_name', 'N/A')}")
     return "\n".join(lines)
 
 
 # ── Agent setup ──────────────────────────────────────────────────────────────
 
 SYSTEM_INSTRUCTIONS = """\
-You are **CarFinder**, a friendly and knowledgeable car-shopping assistant.
+You are **SafeCheck**, a vehicle safety and research assistant powered by \
+official NHTSA (National Highway Traffic Safety Administration) data.
 
-Your job is to help users find available cars that match their preferences.
-You have access to a car listings database via tools.
+Your job is to help users research vehicle safety before buying, or check \
+the recall/complaint history of a car they already own.
+
+## Capabilities
+You have access to 5 tools backed by free U.S. government APIs:
+1. **decode_vin** — Decode a VIN to get full specs (make, model, year, engine, safety features)
+2. **get_recalls** — Check safety recalls for a make/model/year
+3. **get_complaints** — Look up consumer complaints filed with NHTSA
+4. **get_safety_ratings** — Get NCAP crash test star ratings
+5. **lookup_models** — Browse models available for a manufacturer
 
 ## How to behave
-- Always greet the user warmly and ask clarifying questions when needed.
-- At minimum, ask for a **zip code** before searching.
-- Suggest relevant filters (budget, make/model, body type, etc.) to narrow results.
-- Present results in a clean, easy-to-read format with key highlights.
-- When showing multiple results, offer to give more details on any listing.
-- If no results are found, suggest broadening the search criteria.
-- Be conversational but concise — users are busy car shoppers!
-- When comparing cars, create helpful comparison summaries.
-- Proactively mention important considerations (e.g., fuel economy for long commutes,
-  AWD for snowy areas, cargo space for families).
+- Be friendly, helpful, and safety-focused.
+- When a user provides a VIN, decode it first — then proactively offer to \
+check recalls, complaints, and safety ratings for that vehicle.
+- When a user asks about a specific make/model/year, run the relevant \
+lookups and present a safety summary.
+- Always highlight open recalls prominently — they represent free repairs \
+for safety defects.
+- For complaints, note any patterns (e.g., multiple reports about the same component).
+- If safety ratings are low, explain what that means in plain language.
+- Help users compare the safety profiles of different vehicles.
+- If the user isn't sure what model to look at, use lookup_models to show options.
 
 ## Formatting
-- Use bullet points and bold text for readability.
-- Show prices prominently.
-- Mention distance from the user's location.
+- Use bold text and bullet points for readability.
+- Show star ratings visually (⭐⭐⭐⭐⭐).
+- Summarise recall counts and complaint trends prominently.
+- When presenting multiple data points, use clear section headers.
+
+## Limitations
+- NHTSA data covers U.S.-market vehicles only.
+- Safety ratings are available for most but not all vehicles/years.
+- Complaint data reflects consumer reports, not verified defects.
+- You do NOT have access to car listings, prices, or dealer inventory. \
+If a user wants to buy a car, you can help them research its safety first.
 """
+
+_MODE_LABEL = "MOCK" if _mock_mode else "LIVE"
 
 
 def main():
@@ -143,7 +328,7 @@ def main():
     agent = Agent(
         client=client,
         instructions=SYSTEM_INSTRUCTIONS,
-        tools=[search_cars, get_car_details],
+        tools=[decode_vin, get_recalls, get_complaints, get_safety_ratings, lookup_models],
         # History managed by hosting infrastructure
         default_options={"store": False},
     )
