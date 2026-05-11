@@ -1,5 +1,5 @@
 name: car-search-agent
-description: SafeCheck — vehicle safety research assistant powered by NHTSA government data (VIN decode, recalls, complaints, crash test ratings)
+description: Car Advisor — multi-agent system with orchestrator routing to Car Finder, Safety Checker, and Price Estimator specialists via HandoffBuilder workflow
 template:
   kind: hosted
   protocols:

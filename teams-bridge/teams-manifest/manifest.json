@@ -10,12 +10,12 @@
     "termsOfUseUrl": "https://car-search-bridge.azurewebsites.net/api/health"
   },
   "name": {
-    "short": "SafeCheck",
-    "full": "SafeCheck Vehicle Safety Research Assistant"
+    "short": "Car Advisor",
+    "full": "Car Advisor - Search, Safety & Pricing Assistant"
   },
   "description": {
-    "short": "Vehicle safety research powered by NHTSA data",
-    "full": "Research vehicle safety using official NHTSA government data. Check recalls, safety ratings, consumer complaints, decode VINs, and browse models. Powered by Azure Foundry AI agent."
+    "short": "Search cars, check safety, and estimate prices",
+    "full": "Your all-in-one vehicle research assistant. Search car inventory by make, model, and budget. Check NHTSA recalls, safety ratings, and complaints. Estimate fair market values. Powered by Azure Foundry multi-agent system."
   },
   "icons": {
     "outline": "outline.png",

@@ -1,5 +1,6 @@
 agent-framework
 agent-framework-foundry-hosting
+agent-framework-orchestrations
 azure-identity
 python-dotenv
 pydantic

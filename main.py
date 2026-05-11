@@ -1,339 +1,215 @@
-# Copyright (c) 2026. SafeCheck — NHTSA Vehicle Safety Agent.
-# Microsoft Agent Framework + free NHTSA government APIs.
+# Copyright (c) 2026. Car Advisor — Multi-agent orchestration system.
+# Orchestrator + Car Finder + Safety Checker + Price Estimator via HandoffBuilder.
 
 import os
 
-from agent_framework import Agent, tool
 from agent_framework.foundry import FoundryChatClient
+from agent_framework.orchestrations import HandoffBuilder
 from agent_framework_foundry_hosting import ResponsesHostServer
 from azure.identity import DefaultAzureCredential
 from dotenv import load_dotenv
-from pydantic import Field
-from typing_extensions import Annotated
+
+from agents import (
+    create_car_finder_agent,
+    create_orchestrator_agent,
+    create_price_estimator_agent,
+    create_safety_checker_agent,
+)
 
 # Load environment variables from .env file.
 # override=False so Foundry-injected env vars take precedence at runtime.
 load_dotenv(override=False)
 
-# ── Service initialisation (MOCK_MODE toggle) ────────────────────────────────
+# ── Patch: HandoffAgentUserRequest is not JSON-serializable (framework bug) ──
+import json
+from typing import Any, Mapping
 
-_mock_mode = os.environ.get("MOCK_MODE", "false").lower() in ("true", "1", "yes")
+import agent_framework_foundry_hosting._responses as _resp
 
-if _mock_mode:
-    from mock_service import MockService
-    _svc = MockService()
-else:
-    from nhtsa_service import NHTSAService
-    _svc = NHTSAService()
-
-# ── Tools ────────────────────────────────────────────────────────────────────
+_orig_arguments_to_str = _resp._arguments_to_str
 
 
-@tool(approval_mode="never_require")
-def decode_vin(
-    vin: Annotated[str, Field(description="The 17-character Vehicle Identification Number (VIN)")],
-) -> str:
-    """Decode a VIN to get full vehicle specifications — make, model, year,
-    engine, body type, safety features, and manufacturing details.
-
-    A VIN is the unique 17-character code stamped on every vehicle. Users can
-    find it on their dashboard (driver side), door jamb, or insurance card.
-    """
+def _patched_arguments_to_str(arguments: str | Mapping[str, Any] | None) -> str:
+    if arguments is None:
+        return ""
+    if isinstance(arguments, str):
+        return arguments
     try:
-        result = _svc.decode_vin(vin)
-    except RuntimeError as e:
-        return f"Error decoding VIN: {e}"
-
-    if "error" in result:
-        return result["error"]
-
-    lines = [f"## VIN Decode: {result.get('vin', vin)}"]
-
-    # Core specs
-    year = result.get("year", "")
-    make = result.get("make", "")
-    model = result.get("model", "")
-    trim = result.get("trim", "")
-    lines.append(f"**Vehicle:** {year} {make} {model} {trim}".strip())
-    if result.get("body_class"):
-        lines.append(f"**Body:** {result['body_class']}")
-    if result.get("vehicle_type"):
-        lines.append(f"**Type:** {result['vehicle_type']}")
-    if result.get("doors"):
-        lines.append(f"**Doors:** {result['doors']}")
-    if result.get("drive_type"):
-        lines.append(f"**Drive:** {result['drive_type']}")
-
-    # Powertrain
-    engine_parts = []
-    if result.get("displacement_l"):
-        engine_parts.append(f"{result['displacement_l']}L")
-    if result.get("engine_cylinders"):
-        engine_parts.append(f"{result['engine_cylinders']}-cyl")
-    if result.get("engine_hp"):
-        engine_parts.append(f"{result['engine_hp']} hp")
-    if engine_parts:
-        lines.append(f"**Engine:** {' / '.join(engine_parts)}")
-    if result.get("fuel_type_primary"):
-        lines.append(f"**Fuel:** {result['fuel_type_primary']}")
-    if result.get("electrification"):
-        lines.append(f"**Electrification:** {result['electrification']}")
-    if result.get("transmission"):
-        lines.append(f"**Transmission:** {result['transmission']}")
-
-    # Manufacturing
-    plant_parts = []
-    if result.get("plant_city"):
-        plant_parts.append(result["plant_city"])
-    if result.get("plant_country"):
-        plant_parts.append(result["plant_country"])
-    if plant_parts:
-        lines.append(f"**Assembled in:** {', '.join(plant_parts)}")
-    if result.get("manufacturer"):
-        lines.append(f"**Manufacturer:** {result['manufacturer']}")
-
-    # Safety features
-    safety = []
-    for feat, label in [
-        ("abs", "ABS"),
-        ("esc", "ESC"),
-        ("tpms", "TPMS"),
-        ("forward_collision_warning", "Forward Collision Warning"),
-        ("lane_departure_warning", "Lane Departure Warning"),
-        ("adaptive_cruise_control", "Adaptive Cruise Control"),
-        ("blind_spot_warning", "Blind Spot Warning"),
-    ]:
-        val = result.get(feat)
-        if val and val.lower() not in ("", "not applicable"):
-            safety.append(f"{label}: {val}")
-    if safety:
-        lines.append("")
-        lines.append("**Safety Features:**")
-        for s in safety:
-            lines.append(f"- {s}")
-
-    if result.get("error_text"):
-        lines.append(f"\n⚠️ {result['error_text']}")
-
-    return "\n".join(lines)
+        return json.dumps(arguments)
+    except TypeError:
+        # HandoffAgentUserRequest (and similar) — serialize via __dict__
+        return json.dumps(arguments, default=lambda o: getattr(o, "__dict__", str(o)))
 
 
-@tool(approval_mode="never_require")
-def get_recalls(
-    make: Annotated[str, Field(description="Vehicle make (e.g. Honda, Toyota, Ford)")],
-    model: Annotated[str, Field(description="Vehicle model (e.g. Civic, Camry, F-150)")],
-    year: Annotated[int, Field(description="Model year (e.g. 2021)")],
-) -> str:
-    """Check for open safety recalls on a specific vehicle.
+_resp._arguments_to_str = _patched_arguments_to_str
 
-    NHTSA recalls are manufacturer-issued fixes for safety defects.
-    Recall repairs are always free at authorized dealers.
-    """
-    try:
-        recalls = _svc.get_recalls(make, model, year)
-    except RuntimeError as e:
-        return f"Error checking recalls: {e}"
+# ── Patch: FileCheckpointStorage missing allowed_checkpoint_types (framework bug) ──
+from agent_framework._workflows._checkpoint import FileCheckpointStorage
 
-    if not recalls:
-        return f"No recalls found for {year} {make} {model}. ✅"
-
-    lines = [f"## Recalls for {year} {make} {model} — {len(recalls)} found\n"]
-    for i, r in enumerate(recalls, 1):
-        lines.append(f"### Recall {i}: {r.get('nhtsa_campaign_number', 'N/A')}")
-        lines.append(f"**Component:** {r.get('component', 'N/A')}")
-        lines.append(f"**Date:** {r.get('report_date', 'N/A')}")
-        lines.append(f"**Summary:** {r.get('summary', 'N/A')}")
-        lines.append(f"**Consequence:** {r.get('consequence', 'N/A')}")
-        lines.append(f"**Remedy:** {r.get('remedy', 'N/A')}")
-        lines.append("")
-    return "\n".join(lines)
+_orig_fcs_init = FileCheckpointStorage.__init__
 
 
-@tool(approval_mode="never_require")
-def get_complaints(
-    make: Annotated[str, Field(description="Vehicle make (e.g. Honda, Toyota, Ford)")],
-    model: Annotated[str, Field(description="Vehicle model (e.g. Civic, Camry, F-150)")],
-    year: Annotated[int, Field(description="Model year (e.g. 2021)")],
-) -> str:
-    """Look up consumer complaints filed with NHTSA for a vehicle.
-
-    Complaints are reports from real owners about problems they experienced.
-    Useful for spotting common issues before buying a used car.
-    """
-    try:
-        complaints = _svc.get_complaints(make, model, year)
-    except RuntimeError as e:
-        return f"Error fetching complaints: {e}"
-
-    if not complaints:
-        return f"No complaints filed for {year} {make} {model}. ✅"
-
-    # Summarise — can be many complaints, limit output
-    total = len(complaints)
-    shown = complaints[:10]
-    lines = [f"## Complaints for {year} {make} {model} — {total} total\n"]
-
-    crashes = sum(1 for c in complaints if c.get("crash"))
-    fires = sum(1 for c in complaints if c.get("fire"))
-    injuries = sum(c.get("injuries", 0) for c in complaints)
-    if crashes or fires or injuries:
-        lines.append(f"⚠️ **Incidents:** {crashes} crashes, {fires} fires, {injuries} injuries reported\n")
-
-    for i, c in enumerate(shown, 1):
-        lines.append(f"**{i}. {c.get('component', 'N/A')}** (filed {c.get('date_filed', 'N/A')})")
-        lines.append(f"   {c.get('summary', 'N/A')}")
-        lines.append("")
-
-    if total > 10:
-        lines.append(f"_(Showing 10 of {total} complaints)_")
-
-    return "\n".join(lines)
+def _patched_fcs_init(self, storage_path, *, allowed_checkpoint_types=None):
+    # Pass None to disable type restrictions entirely — the framework's
+    # allowlist is too restrictive for handoff workflows (blocks MessageRole,
+    # HandoffAgentUserRequest, GenericAlias, etc.).
+    _orig_fcs_init(self, storage_path, allowed_checkpoint_types=None)
+    self._allowed_types = None
 
 
-@tool(approval_mode="never_require")
-def get_safety_ratings(
-    make: Annotated[str, Field(description="Vehicle make (e.g. Honda, Toyota, Ford)")],
-    model: Annotated[str, Field(description="Vehicle model (e.g. Civic, Camry, F-150)")],
-    year: Annotated[int, Field(description="Model year (e.g. 2021)")],
-) -> str:
-    """Get NCAP crash test safety ratings from NHTSA.
+FileCheckpointStorage.__init__ = _patched_fcs_init
 
-    Ratings range from 1 to 5 stars. Not all vehicles have been tested.
-    Covers frontal crash, side crash, and rollover resistance.
-    """
-    try:
-        rating = _svc.get_safety_ratings(make, model, year)
-    except RuntimeError as e:
-        return f"Error fetching safety ratings: {e}"
+# ── Patch: Handoff pending_requests poison multi-turn continuation ────────────
+# After checkpoint restore, internal handoff events populate pending_requests.
+# The next run() then crashes because _extract_function_responses expects
+# FunctionCallOutput content but receives the user's plain text message.
+# Fix: clear pending_requests after restore so user text is treated normally.
+import agent_framework_foundry_hosting._responses as _host_resp
 
-    if not rating:
-        return (
-            f"No NCAP crash test ratings available for {year} {make} {model}. "
-            "This vehicle may not have been tested by NHTSA."
-        )
+_orig_handle_inner_workflow = _host_resp.ResponsesHostServer._handle_inner_workflow
 
-    def stars(val: str) -> str:
-        try:
-            n = int(val)
-            return "⭐" * n + f" ({n}/5)"
-        except (ValueError, TypeError):
-            return val or "Not Rated"
 
-    lines = [
-        f"## Safety Ratings: {rating.get('vehicle_description', f'{year} {make} {model}')}\n",
-        f"**Overall:** {stars(rating.get('overall_rating', ''))}",
-        "",
-        "**Frontal Crash:**",
-        f"- Overall: {stars(rating.get('overall_front_crash', ''))}",
-        f"- Driver: {stars(rating.get('front_crash_driver', ''))}",
-        f"- Passenger: {stars(rating.get('front_crash_passenger', ''))}",
-        "",
-        "**Side Crash:**",
-        f"- Overall: {stars(rating.get('overall_side_crash', ''))}",
-        f"- Driver: {stars(rating.get('side_crash_driver', ''))}",
-        f"- Passenger: {stars(rating.get('side_crash_passenger', ''))}",
-        "",
-        f"**Rollover Resistance:** {stars(rating.get('rollover_rating', ''))}",
-    ]
-    if rating.get("rollover_possibility_pct"):
-        lines.append(f"- Rollover risk: {rating['rollover_possibility_pct']}")
+async def _patched_handle_inner_workflow(self, request, context):
+    async for event in _orig_handle_inner_workflow(self, request, context):
+        yield event
 
-    lines.append("")
-    lines.append(
-        f"**NHTSA Records:** {rating.get('complaints_count', 0)} complaints, "
-        f"{rating.get('recalls_count', 0)} recalls, "
-        f"{rating.get('investigation_count', 0)} investigations"
+
+async def _handle_inner_workflow_fixed(self, request, context):
+    import os as _os
+    from agent_framework._workflows._checkpoint import FileCheckpointStorage as _FCS
+    from agent_framework._workflows._agent import WorkflowAgent as _WA
+
+    input_items = await context.get_input_items()
+    input_messages = await _host_resp._items_to_messages(input_items)
+    is_streaming = request.stream is not None and request.stream is True
+
+    context_id = request.previous_response_id or context.conversation_id
+
+    latest_checkpoint_id = None
+    restore_storage = None
+    if context_id is not None:
+        restore_storage = _FCS(_os.path.join(self._checkpoint_storage_path, context_id))
+        latest_checkpoint = await restore_storage.get_latest(workflow_name=self._agent.workflow.name)
+        if latest_checkpoint is not None:
+            latest_checkpoint_id = latest_checkpoint.checkpoint_id
+
+    write_context_id = context.conversation_id or context.response_id
+    write_storage = _FCS(_os.path.join(self._checkpoint_storage_path, write_context_id))
+
+    # ── Reset workflow running flag ──
+    # If a previous SSE stream was interrupted (e.g. Agent Inspector refresh),
+    # the singleton workflow's _is_running flag may still be True because
+    # _run_cleanup never fired.  Force-reset so the next run() isn't blocked.
+    self._agent.workflow._is_running = False
+
+    # Restore checkpoint (drain events silently)
+    if latest_checkpoint_id is not None:
+        if is_streaming:
+            async for _ in self._agent.run(
+                stream=True,
+                checkpoint_id=latest_checkpoint_id,
+                checkpoint_storage=restore_storage,
+            ):
+                pass
+        else:
+            await self._agent.run(
+                stream=False,
+                checkpoint_id=latest_checkpoint_id,
+                checkpoint_storage=restore_storage,
+            )
+        pass  # pending_requests cleared below
+
+    # ── THE FIX: ALWAYS clear handoff-poisoned pending_requests ──
+    # WorkflowAgent is a shared singleton; stale pending_requests from ANY
+    # prior conversation/restore will crash the next run() call.
+    self._agent.pending_requests.clear()
+
+    # ── Also clear per-executor caches when starting a fresh conversation ──
+    # Without this, agent executors retain message history from prior sessions
+    # and the LLM may hallucinate answers from old context or fail with
+    # "No tool output found for function call" errors.
+    if latest_checkpoint_id is None:
+        from agent_framework._workflows._agent_executor import AgentExecutor as _AE
+        for executor in self._agent.workflow.executors.values():
+            if isinstance(executor, _AE):
+                executor._cache.clear()
+                executor._full_conversation.clear()
+                executor._pending_agent_requests.clear()
+                executor._pending_responses_to_agent.clear()
+                # Reset the agent session to drop dangling tool call history
+                executor._session = executor._agent.create_session()
+
+    response_event_stream = _host_resp.ResponseEventStream(
+        response_id=context.response_id, model=request.model
     )
-    return "\n".join(lines)
+    yield response_event_stream.emit_created()
+    yield response_event_stream.emit_in_progress()
+
+    tracker = _host_resp._OutputItemTracker(response_event_stream)
+
+    # Reset running flag again (checkpoint restore run above may have left it set)
+    self._agent.workflow._is_running = False
+
+    async for update in self._agent.run(
+        input_messages,
+        stream=True,
+        checkpoint_storage=write_storage,
+    ):
+        for content in update.contents:
+            for event in tracker.handle(content):
+                yield event
+            if tracker.needs_async:
+                async for item in _host_resp._to_outputs(response_event_stream, content):
+                    yield item
+                tracker.needs_async = False
+
+    for event in tracker.close():
+        yield event
+
+    await self._delete_not_latest_checkpoints(write_storage, self._agent.workflow.name)
+    yield response_event_stream.emit_completed()
 
 
-@tool(approval_mode="never_require")
-def lookup_models(
-    make: Annotated[str, Field(description="Vehicle make / manufacturer (e.g. Honda, Toyota, BMW)")],
-    year: Annotated[int | None, Field(description="Optional model year to filter by")] = None,
-) -> str:
-    """Look up what models are available for a given make, optionally for a
-    specific year. Useful when the user knows the brand but not the model name.
-    """
-    try:
-        models = _svc.get_models_for_make(make, year)
-    except RuntimeError as e:
-        return f"Error looking up models: {e}"
+_host_resp.ResponsesHostServer._handle_inner_workflow = _handle_inner_workflow_fixed
 
-    if not models:
-        year_str = f" ({year})" if year else ""
-        return f"No models found for {make}{year_str}. Check the manufacturer name."
-
-    year_str = f" ({year})" if year else ""
-    lines = [f"## Models for {make.upper()}{year_str} — {len(models)} found\n"]
-    for m in models:
-        lines.append(f"- {m.get('model_name', 'N/A')}")
-    return "\n".join(lines)
-
-
-# ── Agent setup ──────────────────────────────────────────────────────────────
-
-SYSTEM_INSTRUCTIONS = """\
-You are **SafeCheck**, a vehicle safety and research assistant powered by \
-official NHTSA (National Highway Traffic Safety Administration) data.
-
-Your job is to help users research vehicle safety before buying, or check \
-the recall/complaint history of a car they already own.
-
-## Capabilities
-You have access to 5 tools backed by free U.S. government APIs:
-1. **decode_vin** — Decode a VIN to get full specs (make, model, year, engine, safety features)
-2. **get_recalls** — Check safety recalls for a make/model/year
-3. **get_complaints** — Look up consumer complaints filed with NHTSA
-4. **get_safety_ratings** — Get NCAP crash test star ratings
-5. **lookup_models** — Browse models available for a manufacturer
-
-## How to behave
-- Be friendly, helpful, and safety-focused.
-- When a user provides a VIN, decode it first — then proactively offer to \
-check recalls, complaints, and safety ratings for that vehicle.
-- When a user asks about a specific make/model/year, run the relevant \
-lookups and present a safety summary.
-- Always highlight open recalls prominently — they represent free repairs \
-for safety defects.
-- For complaints, note any patterns (e.g., multiple reports about the same component).
-- If safety ratings are low, explain what that means in plain language.
-- Help users compare the safety profiles of different vehicles.
-- If the user isn't sure what model to look at, use lookup_models to show options.
-
-## Formatting
-- Use bold text and bullet points for readability.
-- Show star ratings visually (⭐⭐⭐⭐⭐).
-- Summarise recall counts and complaint trends prominently.
-- When presenting multiple data points, use clear section headers.
-
-## Limitations
-- NHTSA data covers U.S.-market vehicles only.
-- Safety ratings are available for most but not all vehicles/years.
-- Complaint data reflects consumer reports, not verified defects.
-- You do NOT have access to car listings, prices, or dealer inventory. \
-If a user wants to buy a car, you can help them research its safety first.
-"""
-
-_MODE_LABEL = "MOCK" if _mock_mode else "LIVE"
+# ── Multi-agent workflow assembly ─────────────────────────────────────────────
 
 
 def main():
+    # Shared model client — one model, one cost line.
     client = FoundryChatClient(
         project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
         model=os.environ["AZURE_AI_MODEL_DEPLOYMENT_NAME"],
         credential=DefaultAzureCredential(),
     )
 
-    agent = Agent(
-        client=client,
-        instructions=SYSTEM_INSTRUCTIONS,
-        tools=[decode_vin, get_recalls, get_complaints, get_safety_ratings, lookup_models],
-        # History managed by hosting infrastructure
-        default_options={"store": False},
+    # Create specialist agents
+    orchestrator = create_orchestrator_agent(client)
+    car_finder = create_car_finder_agent(client)
+    safety_checker = create_safety_checker_agent(client)
+    price_estimator = create_price_estimator_agent(client)
+
+    # Build handoff topology — orchestrator is the hub.
+    workflow_agent = (
+        HandoffBuilder(
+            name="car_advisor",
+            participants=[orchestrator, car_finder, safety_checker, price_estimator],
+        )
+        .with_start_agent(orchestrator)
+        # Orchestrator routes to specialists
+        .add_handoff(orchestrator, [car_finder], description="Search car inventory listings by make, model, price, mileage, location. Use ONLY for finding cars to buy.")
+        .add_handoff(orchestrator, [safety_checker], description="NHTSA safety data: recalls, complaints, crash ratings, VIN decoding. Use for ANY question about recalls, safety, or VIN lookup.")
+        .add_handoff(orchestrator, [price_estimator], description="Estimate fair market value using depreciation model. Use for pricing, valuation, or worth questions.")
+        # Specialists return to orchestrator when done
+        .add_handoff(car_finder, [orchestrator], description="Return after search complete")
+        .add_handoff(safety_checker, [orchestrator], description="Return after safety check")
+        .add_handoff(price_estimator, [orchestrator], description="Return after estimation")
+        .build()
+        .as_agent()
     )
 
-    server = ResponsesHostServer(agent)
+    # Host the workflow — ResponsesHostServer natively supports WorkflowAgent.
+    server = ResponsesHostServer(workflow_agent)
     server.run()
 
 

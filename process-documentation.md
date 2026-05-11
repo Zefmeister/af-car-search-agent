@@ -23,8 +23,9 @@
 11. [Cost Analysis](#11-cost-analysis)
 12. [Lessons Learned](#12-lessons-learned)
 13. [Phase 6 — Teams Integration (Bot Service Bridge)](#13-phase-6--teams-integration-bot-service-bridge)
-14. [Root Cause Analysis — Foundry Hosted Agent Endpoint Discovery](#14-root-cause-analysis--foundry-hosted-agent-endpoint-discovery)
-15. [Enterprise Alternative — M365 Declarative Agent](#15-enterprise-alternative--m365-declarative-agent)
+14. [Phase 7 — Multi-Agent Orchestration (HandoffBuilder)](#14-phase-7--multi-agent-orchestration-handoffbuilder)
+15. [Root Cause Analysis — Foundry Hosted Agent Endpoint Discovery](#15-root-cause-analysis--foundry-hosted-agent-endpoint-discovery)
+16. [Enterprise Alternative — M365 Declarative Agent](#16-enterprise-alternative--m365-declarative-agent)
 16. [Appendix A — Complete Command Reference](#appendix-a--complete-command-reference)
 17. [Appendix B — Identity & RBAC Matrix](#appendix-b--identity--rbac-matrix)
 18. [Appendix C — Troubleshooting Decision Tree](#appendix-c--troubleshooting-decision-tree)
@@ -33,11 +34,11 @@
 
 ## 1. Executive Summary
 
-This document details the end-to-end process of deploying a custom AI agent (car search assistant) to **Azure Foundry** as a **hosted agent**. The agent uses the **Microsoft Agent Framework** (Python), is containerized with Docker, hosted in **Azure Container Registry (ACR)**, and served by the Foundry Agent Service platform.
+This document details the end-to-end process of deploying a **multi-agent AI system** (Car Advisor) to **Azure Foundry** as a **hosted agent**. The system uses 4 agents — an **Orchestrator** routing to **Car Finder**, **Safety Checker**, and **Price Estimator** specialists — connected via the **HandoffBuilder** workflow pattern from the Microsoft Agent Framework (Python). It is containerized with Docker, hosted in **Azure Container Registry (ACR)**, and served by the Foundry Agent Service platform.
 
 ### What Took Time
 
-The application code was straightforward. **~80% of the debugging effort was spent on Azure identity and permission configuration** — specifically, understanding which managed identity the Foundry platform uses to pull container images from ACR. This document captures every dead end so your team doesn't repeat them.
+The initial single-agent code was straightforward. **~80% of the Phase 5 debugging effort was spent on Azure identity and permission configuration** — specifically, understanding which managed identity the Foundry platform uses to pull container images from ACR. The **Phase 7 multi-agent migration** required significant monkey-patching of the Agent Framework SDK to fix cross-session state isolation, checkpoint serialization, and workflow lifecycle bugs. This document captures every dead end so your team doesn't repeat them.
 
 ### The One-Line Root Cause
 
@@ -126,12 +127,25 @@ The application code was straightforward. **~80% of the debugging effort was spe
 
 ```
 af-car-search-agent/
-├── main.py              # Agent definition, tools, server startup
+├── main.py              # Workflow assembly, monkey-patches, server startup
+├── agents/              # Specialist agent definitions
+│   ├── __init__.py      # Exports 4 factory functions
+│   ├── orchestrator.py  # Triage/routing hub (no tools, routes to specialists)
+│   ├── car_finder.py    # Car inventory search (mock data, 500 listings)
+│   ├── safety_checker.py # NHTSA safety data (recalls, ratings, VIN decode)
+│   └── price_estimator.py # Fair market value estimation (depreciation model)
 ├── car_data.py          # Mock car listing service (500 listings, haversine distance)
+├── nhtsa_service.py     # Live NHTSA API client (recalls, complaints, ratings)
+├── mock_service.py      # Mock NHTSA data for local testing (MOCK_MODE=true)
 ├── agent.yaml           # Agent metadata for Foundry
 ├── Dockerfile           # Container image definition
 ├── requirements.txt     # Python dependencies
 ├── .env                 # Local environment variables
+├── .checkpoints/        # FileCheckpointStorage for workflow state
+├── teams-bridge/        # Azure Function bridge for Bot Service → Foundry
+│   ├── function_app.py  # Azure Functions v2 HTTP trigger
+│   ├── bot/             # CarSearchBot (ActivityHandler → Foundry agent)
+│   └── teams-manifest/  # Teams app manifest + icons
 └── .vscode/
     ├── tasks.json       # Run task with Azure CLI on PATH
     └── launch.json      # Debug attach configuration (debugpy on 5679)
@@ -143,9 +157,11 @@ af-car-search-agent/
 ```
 agent-framework
 agent-framework-foundry-hosting
+agent-framework-orchestrations   # HandoffBuilder multi-agent workflow
 azure-identity
 python-dotenv
 pydantic
+requests                          # NHTSA live API calls
 debugpy
 agent-dev-cli
 ```
@@ -166,7 +182,7 @@ CMD ["python", "main.py"]
 **agent.yaml:**
 ```yaml
 name: car-search-agent
-description: AI-powered car search assistant
+description: Car Advisor — multi-agent system with orchestrator routing to Car Finder, Safety Checker, and Price Estimator specialists via HandoffBuilder workflow
 template:
   kind: hosted
   protocols:
@@ -1349,13 +1365,152 @@ Package `manifest.json` + `color.png` (192×192) + `outline.png` (32×32) into a
 
 ---
 
-## 14. Root Cause Analysis — Foundry Hosted Agent Endpoint Discovery
+## 14. Phase 7 — Multi-Agent Orchestration (HandoffBuilder)
 
-### 14.1 The Problem
+### 14.1 Motivation
+
+The original single-agent implementation had one `Agent` with all tools inline. As capabilities grew (car search + NHTSA safety + price estimation), the single agent's system prompt became too large and routing accuracy degraded. The multi-agent pattern separates concerns into specialist agents with a central orchestrator.
+
+### 14.2 Architecture
+
+```
+                    ┌──────────────────┐
+                    │   Orchestrator   │
+                    │   (no tools)     │
+                    │   Triage & route │
+                    └──────┬───────────┘
+                           │ HandoffBuilder
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+     ┌────────────┐ ┌────────────┐ ┌─────────────┐
+     │ Car Finder │ │  Safety    │ │   Price     │
+     │            │ │  Checker   │ │  Estimator  │
+     │ search_cars│ │ get_recalls│ │ estimate_   │
+     │ get_details│ │ get_ratings│ │   price     │
+     │ ...6 tools │ │ ...5 tools │ │ 1 tool      │
+     └────────────┘ └────────────┘ └─────────────┘
+```
+
+**Key decisions:**
+- **Single model, single cost line:** All 4 agents share one `FoundryChatClient` (gpt-4.1-mini)
+- **Hub-and-spoke topology:** Orchestrator ↔ each specialist (bidirectional), no specialist-to-specialist handoffs
+- **Zero infrastructure cost change:** Same container, same Foundry agent, same ACR image
+
+### 14.3 Technology Stack
+
+| Component | Version | Purpose |
+|-----------|---------|---------|
+| `agent-framework` | 1.3.0 | Core Agent, tool definitions |
+| `agent-framework-foundry-hosting` | 1.0.0a260507 | ResponsesHostServer (HTTP hosting) |
+| `agent-framework-orchestrations` | 1.0.0b260507 | HandoffBuilder, WorkflowAgent |
+
+### 14.4 Agent Definitions
+
+| Agent | File | Tools | Purpose |
+|-------|------|-------|---------|
+| Orchestrator | `agents/orchestrator.py` | 0 (routing only) | Triage user queries, route to correct specialist |
+| Car Finder | `agents/car_finder.py` | 6 | Search car inventory by make/model/price/location |
+| Safety Checker | `agents/safety_checker.py` | 5 | NHTSA recalls, complaints, crash ratings, VIN decode |
+| Price Estimator | `agents/price_estimator.py` | 1 | Fair market value via depreciation model |
+
+### 14.5 HandoffBuilder Topology (main.py)
+
+```python
+workflow_agent = (
+    HandoffBuilder(
+        name="car_advisor",
+        participants=[orchestrator, car_finder, safety_checker, price_estimator],
+    )
+    .with_start_agent(orchestrator)
+    .add_handoff(orchestrator, [car_finder], description="Search car inventory...")
+    .add_handoff(orchestrator, [safety_checker], description="NHTSA safety data...")
+    .add_handoff(orchestrator, [price_estimator], description="Estimate fair market value...")
+    .add_handoff(car_finder, [orchestrator], description="Return after search complete")
+    .add_handoff(safety_checker, [orchestrator], description="Return after safety check")
+    .add_handoff(price_estimator, [orchestrator], description="Return after estimation")
+    .build()
+    .as_agent()
+)
+```
+
+> **⚠️ `.with_start_agent(orchestrator)` is REQUIRED.** Without it, the HandoffBuilder raises a runtime error.
+
+> **⚠️ Handoff descriptions are critical for routing accuracy.** Vague descriptions like "handles car stuff" cause the LLM to route incorrectly. Use explicit, action-oriented descriptions.
+
+### 14.6 Monkey-Patches Required (main.py)
+
+The `WorkflowAgent` + `ResponsesHostServer` combination has several bugs in `agent-framework` 1.3.0 that require monkey-patching. These are **production-critical** — without them, the hosted agent crashes on second conversation.
+
+#### Patch 1: `_arguments_to_str` — HandoffAgentUserRequest Serialization
+
+**Problem:** `json.dumps()` fails on `HandoffAgentUserRequest` objects (not JSON-serializable).
+
+**Fix:** Override with `default=lambda o: getattr(o, "__dict__", str(o))` fallback.
+
+#### Patch 2: `FileCheckpointStorage.__init__` — Type Allowlist
+
+**Problem:** `FileCheckpointStorage` blocks checkpoint types not in its default allowlist. `WorkflowAgent` uses types not in the list.
+
+**Fix:** Override `__init__` to set `allowed_types=None`.
+
+#### Patch 3: `_handle_inner_workflow` — Complete Override
+
+This is the critical patch. The original `ResponsesHostServer._handle_inner_workflow` does not handle:
+
+| Bug | Symptom | Root Cause | Fix in Patch |
+|-----|---------|-----------|--------------|
+| **Cross-session history bleeding** | Second user sees first user's conversation | `AgentExecutor` caches (`_cache`, `_full_conversation`) accumulate across sessions | Clear all executor caches for new sessions (no checkpoint) |
+| **Dangling tool call IDs** | 400 Bad Request on second conversation | `executor._session` carries stale tool call context | Reset `executor._session = executor._agent.create_session()` |
+| **"Workflow is already running"** | RuntimeError if previous stream was interrupted | `Workflow._is_running = True` never cleared if client disconnects mid-stream | Force-reset `_is_running = False` before checkpoint restore AND before main run |
+| **Pending requests crash** | Second turn fails with stale pending_requests | `self._agent.pending_requests` not cleared between turns | Unconditional `self._agent.pending_requests.clear()` |
+
+> **⚠️ WorkflowAgent is a SINGLETON** shared across all conversations in the container. This is the root cause of all cross-session bugs. The monkey-patch must isolate state per conversation by resetting executor internals when no checkpoint exists (= new session).
+
+### 14.7 Full Bug Tracker
+
+| # | Bug | Phase Found | Fix Applied |
+|---|-----|------------|------------|
+| 1 | `HandoffAgentUserRequest` not JSON-serializable | Multi-agent migration | Patch 1: `__dict__` fallback in `_arguments_to_str` |
+| 2 | Emoji characters fail checkpoint encoding on Windows | Multi-agent migration | Replaced all emojis with ASCII in agent instructions |
+| 3 | `FileCheckpointStorage` type allowlist blocks workflow types | Multi-agent migration | Patch 2: `allowed_types=None` |
+| 4 | `pending_requests` not cleared between turns → crash on turn 2 | Multi-turn testing | Unconditional `.clear()` in Patch 3 |
+| 5 | Wrong agent routing (safety questions → car finder) | End-to-end testing | Improved handoff descriptions (explicit, action-oriented) |
+| 6 | Cross-session conversation bleeding | Cross-session testing | Executor cache clearing in Patch 3 |
+| 7 | Dangling tool call IDs → 400 Bad Request | Cross-session testing | `executor._session` reset in Patch 3 |
+| 8 | `Workflow._is_running` stuck after interrupted stream | Interrupted stream testing | Force-reset `_is_running = False` in Patch 3 |
+
+### 14.8 Testing Validation
+
+All tested against the Foundry-hosted container (not just local):
+
+| Test Scenario | Method | Result |
+|--------------|--------|--------|
+| Multi-turn within same session | Search → follow-up → follow-up | ✅ Pass |
+| Cross-session isolation (4 sessions) | Different agents, different topics | ✅ Pass |
+| Interrupted stream recovery | Refresh mid-stream → new session | ✅ Pass |
+| Correct routing: car search query | "Find SUVs near Chicago" | ✅ Routes to Car Finder |
+| Correct routing: safety query | "Any recalls on 2021 Civic?" | ✅ Routes to Safety Checker |
+| Correct routing: pricing query | "What's a 2020 Camry worth?" | ✅ Routes to Price Estimator |
+
+### 14.9 Deployment
+
+Same container, same pipeline — no infrastructure changes:
+
+1. Docker build: `docker build --platform linux/amd64 -t car-search-agent:TAG .`
+2. ACR push: `docker push adityaacr.azurecr.io/car-search-agent:TAG`
+3. Foundry version: POST new version with updated image tag
+
+The multi-agent system adds ~0 cost — same container, same model, same ACR. Token usage increases marginally due to orchestrator routing overhead.
+
+---
+
+## 15. Root Cause Analysis — Foundry Hosted Agent Endpoint Discovery
+
+### 15.1 The Problem
 
 After deploying the bridge, the Function App could authenticate (get tokens) but every call to the Foundry agent returned errors: `401 Unauthorized`, `400 API version not supported`, `404 Not Found`, or `DeploymentNotFound`.
 
-### 14.2 What We Tried (All Failed)
+### 15.2 What We Tried (All Failed)
 
 | Endpoint Pattern | api-version | Result |
 |-----------------|------------|--------|
@@ -1370,7 +1525,7 @@ After deploying the bridge, the Function App could authenticate (get tokens) but
 | `.../agents/{name}/runs` | `2025-05-15-preview` | 404 — empty |
 | `.../agents/{name}/endpoint/openai/responses` | `2025-05-15-preview` | 404 — empty |
 
-### 14.3 How We Found the Answer
+### 15.3 How We Found the Answer
 
 1. **MCP `agent_invoke` tool worked** — confirming the agent itself was healthy
 2. **Searched the `microsoft/agent-framework` GitHub repository** for endpoint construction logic
@@ -1380,7 +1535,7 @@ After deploying the bridge, the Function App could authenticate (get tokens) but
    - `HostedAgentFixture.cs` → "The Foundry-Features header is also required on the invocation pipeline for hosted agents"
    - `call_server.py` sample → Uses `FOUNDRY_AGENT_ENDPOINT` = `https://<resource>.services.ai.azure.com/api/projects/<project>/agents/<agent-name>`
 
-### 14.4 The Correct Pattern
+### 15.4 The Correct Pattern
 
 ```
 POST {project_endpoint}/agents/{agent_name}/endpoint/protocols/openai/responses?api-version=v1
@@ -1401,11 +1556,11 @@ Body:
 - **Header**: `Foundry-Features: hosted-agents` is required
 - **Agent name ≠ model deployment**: The agent name is NOT a model deployment — you cannot use `/openai/v1/responses` with it
 
-### 14.5 The One-Line Summary
+### 15.5 The One-Line Summary
 
 > **Foundry hosted agents use an endpoint-scoped route (`/agents/{name}/endpoint/protocols/openai/responses?api-version=v1`) with a `Foundry-Features: hosted-agents` header — this is NOT documented in standard Azure API docs and must be discovered from the Agent Framework SDK source code.**
 
-### 14.6 Three Simultaneous Issues
+### 15.6 Three Simultaneous Issues
 
 The debugging was complicated because **three issues were masking each other:**
 
@@ -1419,13 +1574,13 @@ Additionally, a **fourth issue** only became visible once the agent call succeed
 
 ---
 
-## 15. Enterprise Alternative — M365 Declarative Agent
+## 16. Enterprise Alternative — M365 Declarative Agent
 
-### 15.1 When to Use This Pattern
+### 16.1 When to Use This Pattern
 
 **Option B: M365 Declarative Agent via Agents Toolkit** is the preferred approach for enterprise deployments where users already have M365 Copilot licenses. This section documents the pattern for future Schneider implementation.
 
-### 15.2 Architecture — Option B
+### 16.2 Architecture — Option B
 
 ```
 ┌──────────┐     ┌──────────────────────┐     ┌─────────────────┐
@@ -1438,7 +1593,7 @@ Additionally, a **fourth issue** only became visible once the agent call succeed
 
 **Key difference:** No Azure Function bridge needed. The M365 Copilot platform natively connects to the Foundry agent via the Agents Toolkit VS Code extension.
 
-### 15.3 Prerequisites (Enterprise)
+### 16.3 Prerequisites (Enterprise)
 
 | Requirement | Personal Account | Enterprise (Schneider) |
 |------------|-----------------|----------------------|
@@ -1449,7 +1604,7 @@ Additionally, a **fourth issue** only became visible once the agent call succeed
 | Azure Function bridge | ✅ Required | ❌ Not required |
 | Managed Identity RBAC | Complex (4 identities) | Simpler (direct connection) |
 
-### 15.4 Implementation Steps (Enterprise)
+### 16.4 Implementation Steps (Enterprise)
 
 1. **Install Agents Toolkit** VS Code extension
 2. **Create Declarative Agent** project via Agents Toolkit scaffold
@@ -1458,7 +1613,7 @@ Additionally, a **fourth issue** only became visible once the agent call succeed
 5. **Publish** to Teams App Catalog (org-wide or targeted)
 6. Users access via M365 Copilot in Teams — no sideloading required
 
-### 15.5 Cost Comparison
+### 16.5 Cost Comparison
 
 | Component | Option A (Bot Service Bridge) | Option B (M365 Declarative Agent) |
 |-----------|-------------------------------|----------------------------------|
@@ -1469,7 +1624,7 @@ Additionally, a **fourth issue** only became visible once the agent call succeed
 | **Bridge infrastructure** | **Yes** (additional code to maintain) | **No** (native platform connection) |
 | **Total added infra cost** | **~$0.15/mo** | **$0** (covered by M365 license) |
 
-### 15.6 Decision Matrix
+### 16.6 Decision Matrix
 
 | Factor | Option A (Bot Service) | Option B (M365 Declarative) |
 |--------|----------------------|---------------------------|
@@ -1495,3 +1650,5 @@ Additionally, a **fourth issue** only became visible once the agent call succeed
 | 2026-05-09 | Aditya Vemuri | Initial creation — complete deployment process documented |
 | 2026-05-10 | Aditya Vemuri | Added Phase 6 — Teams integration via Bot Service bridge pattern |
 | 2026-05-10 | Aditya Vemuri | Phase 6 debugging: Fixed hosted agent endpoint (endpoint-scoped route), token scope (ai.azure.com), missing service principal, typing indicator, additional RBAC roles |
+| 2026-05-10 | Aditya Vemuri | Added Phase 7 — Multi-agent orchestration via HandoffBuilder (4 agents, 8 bugs fixed, monkey-patches documented) |
+| 2026-05-10 | Aditya Vemuri | Updated project structure, requirements.txt, agent description, and Teams bridge greeting to reflect multi-agent system |

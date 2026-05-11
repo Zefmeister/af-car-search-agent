@@ -111,11 +111,11 @@ class CarSearchBot(ActivityHandler):
         for member in members_added:
             if member.id != turn_context.activity.recipient.id:
                 await turn_context.send_activity(
-                    "Hi! I'm **SafeCheck** 🛡️ — your vehicle safety research assistant.\n\n"
-                    "I use official NHTSA government data to help you research vehicle safety. Try:\n"
+                    "Hi! I'm **Car Advisor** -- your all-in-one vehicle research assistant.\n\n"
+                    "I can help you search inventory, check safety data, and estimate prices. Try:\n"
+                    "- *Find me a used SUV under $25k near Chicago*\n"
                     "- *Are there any recalls on a 2021 Honda Civic?*\n"
-                    "- *What are the safety ratings for a 2024 Toyota Camry?*\n"
+                    "- *What's a 2020 Toyota Camry with 45k miles worth?*\n"
                     "- *Decode VIN 1HGBH41JXMN109186*\n"
-                    "- *Show me complaints for a 2022 Ford F-150*\n"
-                    "- *What models does Subaru make?*"
+                    "- *Show me safety ratings for a 2024 RAV4*"
                 )

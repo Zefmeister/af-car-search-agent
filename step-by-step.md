@@ -332,6 +332,7 @@ Create the following project structure:
 ```
 agent-framework
 agent-framework-foundry-hosting
+agent-framework-orchestrations   # Only needed for multi-agent HandoffBuilder workflows
 azure-identity
 python-dotenv
 pydantic
@@ -416,6 +417,40 @@ agent = Agent(
 app = ResponsesHostServer(agent)
 app.run(port=8088)
 ```
+
+#### Step 2.6b: Multi-Agent Alternative (HandoffBuilder)
+
+For systems requiring multiple specialist agents, use the **HandoffBuilder** pattern from `agent-framework-orchestrations`:
+
+```python
+from agent_framework.orchestrations import HandoffBuilder
+
+# Create specialist agents (each with their own tools + instructions)
+orchestrator = Agent(name="orchestrator", instructions="...", model=client)
+specialist_a = Agent(name="specialist_a", instructions="...", model=client, tools=[...])
+specialist_b = Agent(name="specialist_b", instructions="...", model=client, tools=[...])
+
+# Build handoff topology — orchestrator routes to specialists and back
+workflow_agent = (
+    HandoffBuilder(
+        name="my_workflow",
+        participants=[orchestrator, specialist_a, specialist_b],
+    )
+    .with_start_agent(orchestrator)
+    .add_handoff(orchestrator, [specialist_a], description="When to route to A")
+    .add_handoff(orchestrator, [specialist_b], description="When to route to B")
+    .add_handoff(specialist_a, [orchestrator], description="Return when done")
+    .add_handoff(specialist_b, [orchestrator], description="Return when done")
+    .build()
+    .as_agent()
+)
+
+# ResponsesHostServer natively supports WorkflowAgent
+server = ResponsesHostServer(workflow_agent)
+server.run()
+```
+
+> **⚠️ Known Issues (as of agent-framework 1.3.0):** The `WorkflowAgent` is a **singleton** shared across all conversations. `AgentExecutor` state (`_cache`, `_full_conversation`, `_session`) accumulates across sessions. Production deployments require monkey-patching `ResponsesHostServer._handle_inner_workflow` to reset executor state for new sessions and force-clear `workflow._is_running`. See Phase 7 in [process-documentation.md](process-documentation.md) for the complete list of 8 bugs and fixes.
 
 ### Step 2.7: Write .gitignore
 
